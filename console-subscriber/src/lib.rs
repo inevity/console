@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 use console_api as proto;
 use proto::{instrument::instrument_server::InstrumentServer, resources::resource};
+use once_cell::sync::OnceCell;
 use serde::Serialize;
 use std::{
     cell::RefCell,
@@ -24,7 +25,7 @@ use tokio_stream::wrappers::UnixListenerStream;
 use tracing_core::{
     span::{self, Id},
     subscriber::{self, Subscriber},
-    Metadata,
+    Dispatch, Metadata,
 };
 use tracing_subscriber::{
     layer::Context,
@@ -36,6 +37,7 @@ mod aggregator;
 mod attribute;
 mod builder;
 mod callsites;
+mod consequences;
 mod record;
 mod stack;
 mod stats;
@@ -174,6 +176,9 @@ struct Shared {
     /// A counter of how many resource events were dropped because the event buffer
     /// was at capacity.
     dropped_resources: AtomicUsize,
+
+    /// Used to query the consequences of spans.
+    tracer: OnceCell<consequences::Tracer>,
 }
 
 struct Watch<T>(mpsc::Sender<Result<T, tonic::Status>>);
@@ -245,7 +250,8 @@ struct Tracked {}
 impl ConsoleLayer {
     /// Returns a `ConsoleLayer` built with the default settings.
     ///
-    /// Note: these defaults do *not* include values provided via the
+    /// Note:
+    ///  these defaults do *not* include values provided via the
     /// environment variables specified in [`Builder::with_default_env`].
     ///
     /// See also [`Builder::build`].
@@ -532,6 +538,17 @@ impl<S> Layer<S> for ConsoleLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
+    fn on_register_dispatch(&self, dispatch: &Dispatch) {
+        let tracer = consequences::Tracer::from_dispatch::<S>(dispatch);
+        if let Err(_) = self.shared.tracer.set(tracer) {
+            // XXX(jswrenn): This layer has seemingly been supplied *multiple*
+            // subscribers. Is that possible? I guess you can call
+            // `Layer::with_subscriber` multiple times; what happens if you
+            // install the resulting `Layered` as a subscriber? Is `Arc`ing a
+            // `Layered<ConsoleLayer, S>` also a recipe for weirdness?
+        }
+    }
+
     fn register_callsite(&self, meta: &'static Metadata<'static>) -> subscriber::Interest {
         let dropped = match (meta.name(), meta.target()) {
             ("runtime.spawn", _) | ("task", "tokio::task") => {
@@ -570,10 +587,26 @@ where
         };
 
         self.send_metadata(dropped, Event::Metadata(meta));
-        subscriber::Interest::always()
+
+        let is_required = if meta.is_event() {
+            meta.target().starts_with("runtime") || meta.target().starts_with("tokio")
+        } else {
+            // spans will have *names* beginning with "runtime." for backwards
+            // compatibility with older Tokio versions, enable anything with the `tokio`
+            // target as well.
+            meta.name().starts_with("runtime.") || meta.target().starts_with("tokio")
+        };
+
+        if is_required {
+            subscriber::Interest::always()
+        } else {
+            subscriber::Interest::sometimes()
+        }
     }
 
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+        tracing_causality::Layer.on_new_span(attrs, id, ctx.clone());
+
         let metadata = attrs.metadata();
         if self.is_spawn(metadata) {
             let at = Instant::now();
@@ -853,6 +886,8 @@ where
     }
 
     fn on_close(&self, id: span::Id, cx: Context<'_, S>) {
+        tracing_causality::Layer.on_close(id.clone(), cx.clone());
+
         if let Some(span) = cx.span(&id) {
             let now = Instant::now();
             let exts = span.extensions();
@@ -911,7 +946,9 @@ impl Server {
     ///
     /// [environment variable]: `Builder::with_default_env`
     pub const DEFAULT_PORT: u16 = 6669;
+}
 
+impl Server {
     /// Starts the gRPC service with the default gRPC settings.
     ///
     /// To configure gRPC server settings before starting the server, use

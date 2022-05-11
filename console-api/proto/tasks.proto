@@ -4,6 +4,7 @@ package rs.tokio.console.tasks;
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/duration.proto";
+import "consequences.proto";
 import "common.proto";
 
 // A task state update.
@@ -47,6 +48,7 @@ message TaskDetails {
     // The timestamp for when the update to the task took place.
     google.protobuf.Timestamp now = 2;
 
+<<<<<<< HEAD
     // A histogram of task poll durations.
     //
     // This is either:
@@ -65,6 +67,9 @@ message TaskDetails {
     // The scheduled duration is the time a task spends between being
     // woken and when it is next polled.
     DurationHistogram scheduled_times_histogram = 5;
+
+    // What the task is currently busy doing.
+    repeated consequences.Causality causality = 6;
 }
 
 // Data recorded when a new task is spawned.

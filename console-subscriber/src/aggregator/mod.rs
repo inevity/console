@@ -49,7 +49,8 @@ pub struct Aggregator {
     watchers: ShrinkVec<Watch<proto::instrument::Update>>,
 
     /// Currently active RPCs streaming task details events, by task ID.
-    details_watchers: ShrinkMap<Id, Vec<Watch<proto::tasks::TaskDetails>>>,
+    details_watchers:
+        ShrinkMap<Id, Vec<(tracing_causality::Updates, Watch<proto::tasks::TaskDetails>)>>,
 
     /// *All* metadata for task spans and user-defined spans that we care about.
     ///
@@ -331,6 +332,24 @@ impl Aggregator {
             let (tx, rx) = mpsc::channel(buffer);
             let subscription = Watch(tx);
             let now = Some(self.base_time.to_timestamp(Instant::now()));
+
+            let span = id.clone();
+
+            let maybe_trace = self
+                .shared
+                .tracer
+                .get()
+                .and_then(|tracer| tracer.trace(&span, buffer));
+
+            let (initial, updates) = if let Some((trace, updates)) = maybe_trace {
+                (crate::consequences::trace_into_proto(trace), updates)
+            } else {
+                // a trace could not be produced, either because the layer hasn't
+                // been installed yet as the subscriber yet, or because the span
+                // is already closed
+                (vec![], tracing_causality::Updates::default())
+            };
+
             // Send back the stream receiver.
             // Then send the initial state --- if this fails, the subscription is already dead.
             if stream_sender.send(rx).is_ok()
@@ -339,12 +358,13 @@ impl Aggregator {
                     now,
                     poll_times_histogram: Some(stats.poll_duration_histogram()),
                     scheduled_times_histogram: Some(stats.scheduled_duration_histogram()),
+                    causality: initial,
                 })
             {
                 self.details_watchers
                     .entry(id.clone())
                     .or_insert_with(Vec::new)
-                    .push(subscription);
+                    .push((updates, subscription));
             }
         }
         // If the task is not found, drop `stream_sender` which will result in a not found error
@@ -380,16 +400,24 @@ impl Aggregator {
         let stats = &self.task_stats;
         // Assuming there are much fewer task details subscribers than there are
         // stats updates, iterate over `details_watchers` and compact the map.
-        self.details_watchers.retain_and_shrink(|id, watchers| {
+        self.details_watchers.retain_and_shrink(|id, updates_and_watchers| {
             if let Some(task_stats) = stats.get(id) {
                 let details = proto::tasks::TaskDetails {
                     task_id: Some(id.clone().into()),
                     now: Some(self.base_time.to_timestamp(Instant::now())),
                     poll_times_histogram: Some(task_stats.poll_duration_histogram()),
                     scheduled_times_histogram: Some(task_stats.scheduled_duration_histogram()),
+                    causality: vec![],
                 };
-                watchers.retain(|watch| watch.update(&details));
-                !watchers.is_empty()
+                updates_and_watchers.retain(|(updates, watch)| {
+                    let updates = crate::consequences::updates_into_proto(updates);
+                    let details = proto::tasks::TaskDetails {
+                        causality: updates,
+                        ..details.clone()
+                    };
+                    watch.update(&details)
+                });
+                !updates_and_watchers.is_empty()
             } else {
                 false
             }

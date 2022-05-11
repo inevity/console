@@ -1,6 +1,10 @@
 use crate::{
     input,
-    state::{tasks::Task, DetailsRef},
+//     state::{tasks::Task, DetailsRef},
+    state::{
+        tasks::{Details, Task},
+        DetailsRef, State,
+    },
     util::Percentage,
     view::{
         self, bold,
@@ -17,6 +21,7 @@ use ratatui::{
 use std::{
     cell::RefCell,
     cmp,
+    fmt,
     rc::Rc,
     time::{Duration, SystemTime},
 };
@@ -41,6 +46,7 @@ impl TaskView {
         frame: &mut ratatui::terminal::Frame<B>,
         area: layout::Rect,
         now: SystemTime,
+        state: &mut State,
     ) {
         // Rows with the following info:
         // - Task main attributes
@@ -74,6 +80,7 @@ impl TaskView {
             poll_dur_area,
             scheduled_dur_area,
             fields_area,
+            stats_area,
             warnings_area,
         ) = if warnings.is_empty() {
             let chunks = Layout::default()
@@ -89,12 +96,15 @@ impl TaskView {
                         // scheduled duration
                         layout::Constraint::Length(9),
                         // fields
+                        // TODO percent?
                         layout::Constraint::Percentage(60),
+                        // stack
+                        layout::Constraint::Percentage(50),
                     ]
                     .as_ref(),
                 )
                 .split(area);
-            (chunks[0], chunks[1], chunks[2], chunks[3], chunks[4], None)
+            (chunks[0], chunks[1], chunks[2], chunks[3], chunks[4],  chunks[5], None)
         } else {
             let chunks = Layout::default()
                 .direction(layout::Direction::Vertical)
@@ -112,6 +122,8 @@ impl TaskView {
                         layout::Constraint::Length(9),
                         // fields
                         layout::Constraint::Percentage(60),
+                        // stack
+                        layout::Constraint::Percentage(50),
                     ]
                     .as_ref(),
                 )
@@ -123,6 +135,7 @@ impl TaskView {
                 chunks[3],
                 chunks[4],
                 chunks[5],
+                chunks[6],
                 Some(chunks[1]),
             )
         };
@@ -232,6 +245,14 @@ impl TaskView {
         let task_widget = Paragraph::new(overview).block(styles.border_block().title("Task"));
         let wakers_widget = Paragraph::new(waker_stats).block(styles.border_block().title("Waker"));
 
+        let stack_widget = Paragraph::new(
+            details
+                .map(|details| details.make_stack_widget(styles, state))
+                .unwrap_or_default(),
+        )
+        .wrap(tui::widgets::Wrap { trim: true })
+        .block(styles.border_block().title("Stack"));
+
         let poll_percentiles_title = "Poll Times Percentiles";
         let scheduled_percentiles_title = "Sched Times Percentiles";
         let percentiles_width = cmp::max(
@@ -258,12 +279,28 @@ impl TaskView {
         frame.render_widget(poll_durations_widget, poll_dur_area);
         frame.render_widget(scheduled_durations_widget, scheduled_dur_area);
         frame.render_widget(fields_widget, fields_area);
+        frame.render_widget(stack_widget, stack_area);
     }
 }
 
 impl HelpText for TaskView {
     fn render_help_content(&self, styles: &view::Styles) -> Paragraph<'static> {
         controls_paragraph(view_controls(), styles)
+    }
+
+    /// Render the consequences as an ascii tree.
+    fn make_stack_widget(&self, styles: &view::Styles, state: &State) -> Text<'static> {
+        // XXX(jswrenn): also implement an ASCII-only rendering mode
+        let mut buf = String::new();
+        if let Some(causality) = self.causality.as_ref() {
+            let root = causality.root().clone();
+            display(&mut buf, styles, state, causality, &root, true, "").unwrap();
+        } else {
+            buf.push_str(
+                "An unexpected error prevents us from showing consequences for this task.",
+            );
+        }
+        Text::from(buf)
     }
 }
 
@@ -275,4 +312,57 @@ const fn view_controls() -> &'static [ControlDisplay] {
             utf8: Some("\u{238B} esc"),
         }],
     }]
+}
+
+fn display<W: fmt::Write>(
+    mut f: &mut W,
+    styles: &view::Styles,
+    state: &State,
+    tree: &tracing_causality::Trace<u64>,
+    root: &tracing_causality::Span<u64>,
+    is_last: bool,
+    prefix: &str,
+) -> fmt::Result {
+    let metadata = state.metas.get(&root.metadata);
+
+    let name = metadata
+        .map(|meta| format!("{}", meta.name.to_string()))
+        .unwrap_or(format!("{:?}", root));
+
+    let location = metadata
+        .map(|meta| format!(" ({})", meta.location))
+        .unwrap_or("".to_string());
+
+    let root_fmt = format!("{}{}", name, location);
+
+    let current;
+    let next;
+
+    if is_last {
+        let pipes = if styles.utf8 { "└─" } else { "`-" };
+        current = format!("{prefix}{pipes}\u{a0}{root_fmt}");
+        next = format!("{}\u{a0}\u{a0}\u{a0}", prefix);
+    } else {
+        let pipes = if styles.utf8 { "├─" } else { "|-" };
+        current = format!("{prefix}{pipes}\u{a0}{root_fmt}");
+        next = format!("{}│\u{a0}\u{a0}", prefix);
+    }
+
+    writeln!(&mut f, "{}", {
+        let mut current = current.chars();
+        current.next().unwrap();
+        current.next().unwrap();
+        &current.as_str()
+    })?;
+
+    if let Some(consequences) = tree.consequences(root) {
+        let direct = consequences.iter_direct();
+        let len = direct.len();
+        for (i, consequence) in direct.enumerate() {
+            let is_last = i == len - 1;
+            display(f, styles, state, tree, &consequence, is_last, &next)?;
+        }
+    }
+
+    Ok(())
 }

@@ -20,6 +20,8 @@ use std::{
     rc::{Rc, Weak},
     time::{Duration, SystemTime},
 };
+use tracing_causality::Trace;
+use tui::{style::Color, text::Span};
 
 #[derive(Default, Debug)]
 pub(crate) struct TasksState {
@@ -28,11 +30,12 @@ pub(crate) struct TasksState {
     dropped_events: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Details {
     pub(crate) span_id: SpanId,
     pub(crate) poll_times_histogram: Option<DurationHistogram>,
     pub(crate) scheduled_times_histogram: Option<DurationHistogram>,
+    pub(crate) causality: Option<Trace<u64>>,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -95,6 +98,8 @@ pub(crate) struct Task {
     /// Currently active warnings for this task.
     warnings: Vec<Linter<Task>>,
     location: String,
+
+    meta_id: u64,
 }
 
 #[derive(Debug)]
@@ -216,6 +221,7 @@ impl TasksState {
                     target: meta.target.clone(),
                     warnings: Vec::new(),
                     location,
+                    meta_id,
                 };
                 task.lint(linters);
                 Some((id, task))
@@ -294,6 +300,10 @@ impl Task {
 
     pub(crate) fn short_desc(&self) -> &str {
         &self.short_desc
+    }
+
+    pub(crate) fn meta_id(&self) -> u64 {
+        self.meta_id
     }
 
     pub(crate) fn name(&self) -> Option<&str> {

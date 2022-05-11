@@ -6,3 +6,8 @@ members = [
     "xtask"
 ]
 resolver = "2"
+
+[patch.crates-io]
+#tracing = { path = '/home/jswrenn/projects/tracing/tracing' }
+#tracing-core = { path = '/home/jswrenn/projects/tracing/tracing-core' }
+#tracing-subscriber = { path = '/home/jswrenn/projects/tracing/tracing-subscriber' }

@@ -59,6 +59,10 @@ pub struct TaskDetails {
     /// - a binary histogram plus details on outliers (current)
     #[prost(oneof = "task_details::PollTimesHistogram", tags = "3, 4")]
     pub poll_times_histogram: ::core::option::Option<task_details::PollTimesHistogram>,
+
+    /// What the task is currently busy doing.
+    #[prost(message, repeated, tag="6")]
+    pub causality: ::prost::alloc::vec::Vec<super::consequences::Causality>,
 }
 /// Nested message and enum types in `TaskDetails`.
 pub mod task_details {
