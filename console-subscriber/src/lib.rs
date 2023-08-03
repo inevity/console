@@ -688,8 +688,11 @@ where
         if self.waker_callsites.contains(metadata) {
             let at = Instant::now();
             let mut visitor = WakerVisitor::default();
+            //tracing.core record visistor
+            //id from task.id spanid, op from op in the event::Waker target tokio::task::waker
             event.record(&mut visitor);
             // XXX (eliza): ew...
+            // from waker trace 
             if let Some((id, mut op)) = visitor.result() {
                 if let Some(span) = ctx.span(&id) {
                     let exts = span.extensions();
@@ -707,6 +710,7 @@ where
                         }
 
                         stats.record_wake_op(op, at);
+                        //If no record, no nothing
                         self.record(|| record::Event::Waker {
                             id: id.into_u64(),
                             at: self.base_time.to_system_time(at),
@@ -1173,6 +1177,7 @@ impl proto::instrument::instrument_server::Instrument for Server {
         Ok(tonic::Response::new(proto::instrument::ResumeResponse {}))
     }
 }
+
 
 impl WakeOp {
     /// Returns `true` if `self` is a `Wake` or `WakeByRef` event.
